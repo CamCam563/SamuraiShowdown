@@ -28,15 +28,33 @@ String screen = "MENU";
 String[] menuItems = { "VS MODE  (2 Players)", "CONTROLS", "QUIT" };
 int menuIndex = 0;
 
+//character select  (roster is intentionally easy to extend)
+final int ROSTER_SIZE = 7;
+String[]  rosterNames     = { "SAMURAI", "BRAWLER", "?", "?", "?", "?", "?" };
+boolean[] rosterAvailable = { true, true, false, false, false, false, false };
+PImage    samuraiIcon, brawlerIcon;                // editable icons (named per request)
+PImage[]  rosterIcons = new PImage[ROSTER_SIZE];   // null slot => draw a "?" box
+
+int     p1Cursor = 0, p2Cursor = 1;          // hovered slot per player
+boolean p1Locked = false, p2Locked = false;  // confirmed?
+int     p1CharIndex = 0, p2CharIndex = 1;    // committed picks used by spawnPlayers()
+int     p1Flash = 0, p2Flash = 0;            // red-flash countdown when confirming a "?"
+
+//end-of-match menu
+String[] endMenuItems = { "PLAY AGAIN", "SWAP CHARACTERS", "MAIN MENU" };
+int      endMenuIndex = 0;
+
 // "ROUND_INTRO", "FIGHTING", "ROUND_OVER", "MATCH_OVER"
 String matchState = "ROUND_INTRO";
 String roundMsg   = "";
 int    roundTimer = 0;
-final int ROUND_DELAY = 150;
+final int ROUND_DELAY     = 75;   // frames the "K.O.!" / "TIME" banner shows between non-deciding rounds
+final int MATCH_END_DELAY = 60;   // short buffer showing "PLAYER X WINS!" before the menu appears
 
 int currentRound = 1;
 int introTimer   = 0;
 final int INTRO_TIME = 110;
+boolean fightVoicePlayed = false;   // gate the announcer to once per round
 
 //GAME FEEL
 int   hitFreeze  = 0;   // frames the action is paused after a hit (hitstop)
@@ -49,8 +67,8 @@ int   CHIP_DMG  = 4;    // damage a correct block still takes (can NEVER KO)
 int   HITSTUN   = 14;   // frames the victim is frozen after a clean hit
 
 //ULTIMATE METER GAIN (per point of damage)
-float METER_DEAL = 1.4;   // charge gained by the attacker (primary source)
-float METER_TAKE = 0.7;   // charge gained by the victim   (secondary source)
+float METER_DEAL = 0.7;    // charge gained by the attacker (primary source) — halved: ult takes 2x as long to charge
+float METER_TAKE = 0.35;   // charge gained by the victim   (secondary source)
 
 //ROUND TIMER
 int   roundTimeFrames = 99 * 60;   // 99-count clock at 60fps
@@ -79,9 +97,19 @@ void setup() {
   minecraft = createFont("Minecraft.ttf", 32);
 
   loadHighScore();
+  loadSounds();
+
+  // character-select icons (reuse the idle sprites; swap these paths for custom art)
+  samuraiIcon = loadImage("images/idle/samuraiidle0.png");
+  brawlerIcon = loadImage("images/idle/brawleridle0.png");
+  rosterIcons[0] = samuraiIcon;
+  rosterIcons[1] = brawlerIcon;
+  // rosterIcons[2..6] stay null -> "?" boxes. To add a fighter later: drop an icon
+  // here, set rosterNames/rosterAvailable, and extend makeFighter().
 
   frameRate(60);
   screen = "MENU";
+  playMusic(musMenu);
 }
 void startMatch() {
   p1Wins = 0;
@@ -91,7 +119,12 @@ void startMatch() {
 }
 
 void startRound() {
+  // ult meter carries over between rounds of a match (but a fresh match — round 1 — starts empty)
+  float p1Meter = (currentRound > 1 && p1 != null) ? p1.ultMeter : 0;
+  float p2Meter = (currentRound > 1 && p2 != null) ? p2.ultMeter : 0;
   spawnPlayers();
+  p1.ultMeter = p1Meter;
+  p2.ultMeter = p2Meter;
   matchState = "ROUND_INTRO";
   introTimer = INTRO_TIME;
   roundMsg   = "";
@@ -99,6 +132,8 @@ void startRound() {
   shakeMag   = 0;
   parryFlash = 0;
   roundClock = roundTimeFrames;
+  fightVoicePlayed = false;
+  playMusic(musFight, 0.22);   // fight track at half volume, under the action
   frameRate(60);
 }
 
@@ -113,6 +148,10 @@ void draw() {
   }
   if (screen.equals("CONTROLS")) {
     drawControls();
+    return;
+  }
+  if (screen.equals("CHAR_SELECT")) {
+    drawCharSelect();
     return;
   }
 
@@ -143,6 +182,10 @@ void draw() {
       p1.update();
       p2.update();
       introTimer--;
+      if (!fightVoicePlayed && introTimer <= INTRO_TIME * 0.45) {   // "FIGHT!" appears
+        sfx(sndFightVoice, 0.9);
+        fightVoicePlayed = true;
+      }
       if (introTimer <= 0) matchState = "FIGHTING";
     } else if (matchState.equals("FIGHTING")) {
       p1.update();
@@ -153,17 +196,22 @@ void draw() {
       if (matchState.equals("FIGHTING")) {
         roundClock--;
         if (roundClock <= 0) {
-          matchState = "ROUND_OVER";
-          roundTimer = ROUND_DELAY;
           impact(20, 16);
+          if      (p1.hp > p2.hp) p1Wins++;
+          else if (p2.hp > p1.hp) p2Wins++;
+          matchState = "ROUND_OVER";
           frameRate(30);
-          if      (p1.hp > p2.hp) {
-            p1Wins++;
-            roundMsg = "TIME \u2014 P1 WINS";
-          } else if (p2.hp > p1.hp) {
-            p2Wins++;
-            roundMsg = "TIME \u2014 P2 WINS";
-          } else                      roundMsg = "DRAW";
+
+          if (p1Wins >= roundsToWin) {
+            roundMsg = "PLAYER 1 WINS!";  roundTimer = MATCH_END_DELAY;
+          } else if (p2Wins >= roundsToWin) {
+            roundMsg = "PLAYER 2 WINS!";  roundTimer = MATCH_END_DELAY;
+          } else {
+            roundTimer = ROUND_DELAY;
+            if      (p1.hp > p2.hp) roundMsg = "TIME \u2014 P1 WINS";
+            else if (p2.hp > p1.hp) roundMsg = "TIME \u2014 P2 WINS";
+            else                    roundMsg = "DRAW";
+          }
         }
       }
     } else {  // ROUND_OVER or MATCH_OVER
@@ -171,33 +219,9 @@ void draw() {
       p2.update();
       roundTimer--;
       if (roundTimer <= 0 && matchState.equals("ROUND_OVER")) {
-        if (p1Wins >= roundsToWin) {
-          matchState = "MATCH_OVER";
-          roundMsg   = "PLAYER 1 WINS!";
-          frameRate(60);
-
-          p1TotalWins++;
-          p1WinStreak++;
-          p2WinStreak = 0; // Reset P2's streak
-
-          if (p1WinStreak > p1HighestStreak) {
-            p1HighestStreak = p1WinStreak;
-            saveHighScore();
-          }
-        } else if (p2Wins >= roundsToWin) {
-          matchState = "MATCH_OVER";
-          roundMsg   = "PLAYER 2 WINS!";
-          frameRate(60);
-
-          p2TotalWins++;
-          p2WinStreak++;
-          p1WinStreak = 0; // Reset P1's streak
-
-          if (p2WinStreak > p2HighestStreak) {
-            p2HighestStreak = p2WinStreak;
-            saveHighScore();
-          }
-        } else {
+        if      (p1Wins >= roundsToWin) goToMatchOver(1);
+        else if (p2Wins >= roundsToWin) goToMatchOver(2);
+        else {
           currentRound++;
           startRound();
         }
@@ -295,6 +319,7 @@ void drawMenu() {
 void drawControls() {
   background(20, 22, 28);
 
+  textFont(minecraft);
   textAlign(CENTER, CENTER);
   fill(235, 205, 110);
   textSize(50);
@@ -327,7 +352,7 @@ void drawControls() {
   text("UP ARROW           jump", rx, ty + dy);
   text("Num0 / .    strike  (toward=lunge, back=hop, \u2193=low)", rx, ty + dy * 2);
   text("Num. / ,    block   (hold \u2193 = low)", rx, ty + dy * 3);
-  text("Num5 / /    draw / sheathe", rx, ty + dy * 4);
+  text("Num5 / /    dodge   (tap a direction to roll that way)", rx, ty + dy * 4);
   fill(235, 205, 110);
   text("Num+ / L    BARRAGE ultimate  (when meter full)", rx, ty + dy * 5);
 
@@ -342,14 +367,141 @@ void drawControls() {
   textAlign(LEFT, BASELINE);
 }
 
+void drawCharSelect() {
+  background(20, 22, 28);
+  noStroke();
+  fill(60, 40, 20);
+  rect(0, 570, width, 220);
+
+  textFont(minecraft);
+  textAlign(CENTER, CENTER);
+  fill(235, 205, 110);
+  textSize(54);
+  text("CHOOSE YOUR FIGHTER", width / 2, 90);
+
+  // roster row
+  float boxW = 110, boxH = 130, gap = 14;
+  float rowW = ROSTER_SIZE * boxW + (ROSTER_SIZE - 1) * gap;
+  float startX = (width - rowW) / 2.0;
+  float boxY = 250;
+
+  for (int i = 0; i < ROSTER_SIZE; i++) {
+    float bx = startX + i * (boxW + gap);
+
+    // box background
+    noStroke();
+    fill(rosterAvailable[i] ? color(46, 50, 60) : color(32, 34, 40));
+    rect(bx, boxY, boxW, boxH);
+
+    // icon or "?"
+    if (rosterIcons[i] != null) {
+      PImage ic = rosterIcons[i];
+      float pad = 14;
+      float maxW = boxW - pad * 2, maxH = boxH - pad * 2;
+      float sc = min(maxW / ic.width, maxH / ic.height);
+      float dw = ic.width * sc, dh = ic.height * sc;
+      image(ic, bx + (boxW - dw) / 2, boxY + (boxH - dh) / 2, dw, dh);
+    } else {
+      fill(120);
+      textSize(64);
+      text("?", bx + boxW / 2, boxY + boxH / 2);
+    }
+
+    // red flash when a player confirmed this locked slot
+    int flash = 0;
+    if (p1Cursor == i) flash = max(flash, p1Flash);
+    if (p2Cursor == i) flash = max(flash, p2Flash);
+    if (flash > 0) {
+      noStroke();
+      fill(200, 40, 40, flash * 12);
+      rect(bx, boxY, boxW, boxH);
+    }
+
+    // name under box
+    fill(rosterAvailable[i] ? color(210) : color(110));
+    textSize(15);
+    text(rosterNames[i], bx + boxW / 2, boxY + boxH + 22);
+  }
+
+  // cursors (P1 blue, P2 red); offset slightly so overlapping reads
+  drawCursor(p1Cursor, startX, boxY, boxW, boxH, gap, color(90, 150, 255), "P1", p1Locked, -4);
+  drawCursor(p2Cursor, startX, boxY, boxW, boxH, gap, color(235, 90, 90), "P2", p2Locked,  4);
+
+  // tick flash timers
+  if (p1Flash > 0) p1Flash--;
+  if (p2Flash > 0) p2Flash--;
+
+  // hints
+  fill(120);
+  textSize(14);
+  text("P1:  A / D  move      SPACE  lock          P2:  ← / →  move      Num0 / .  lock",
+    width / 2, height - 60);
+  text("both players lock in to FIGHT", width / 2, height - 38);
+
+  textAlign(LEFT, BASELINE);
+}
+
+void drawCursor(int idx, float startX, float boxY, float boxW, float boxH, float gap,
+                color col, String label, boolean locked, float off) {
+  float bx = startX + idx * (boxW + gap) + off;
+  float by = boxY + off;
+  noFill();
+  strokeWeight(locked ? 6 : 3);
+  stroke(col);
+  rect(bx, by, boxW, boxH);
+  noStroke();
+  fill(col);
+  textAlign(CENTER, CENTER);
+  textSize(16);
+  text(locked ? label + " READY" : label, bx + boxW / 2, by - 14);
+  strokeWeight(1);
+}
+
 void selectMenu() {
-  if (menuIndex == 0) {            // VS MODE
-    screen = "GAME";
-    startMatch();
+  if (menuIndex == 0) {            // VS MODE -> pick fighters first
+    resetCharSelect();
+    screen = "CHAR_SELECT";
   } else if (menuIndex == 1) {     // CONTROLS
     screen = "CONTROLS";
   } else if (menuIndex == 2) {     // QUIT
     exit();
+  }
+}
+
+void resetCharSelect() {
+  p1Cursor = p1CharIndex;   // start on the last-used picks (nice for "swap")
+  p2Cursor = p2CharIndex;
+  p1Locked = false; p2Locked = false;
+  p1Flash = 0; p2Flash = 0;
+}
+
+void tryLock(boolean isP1) {
+  int cur = isP1 ? p1Cursor : p2Cursor;
+  if (!rosterAvailable[cur]) {            // "?" slot -> flash red, do nothing else
+    if (isP1) p1Flash = 18; else p2Flash = 18;
+    sfx(sndMenuMove, 0.5);
+    return;
+  }
+  if (isP1) p1Locked = true; else p2Locked = true;
+  sfx(sndMenuSelect, 0.7);
+  if (p1Locked && p2Locked) {            // both in -> commit + fight
+    p1CharIndex = p1Cursor;
+    p2CharIndex = p2Cursor;
+    screen = "GAME";
+    startMatch();
+  }
+}
+
+void selectEndMenu() {
+  if (endMenuIndex == 0) {                 // PLAY AGAIN (same fighters)
+    startMatch();                          // stays on screen "GAME"
+  } else if (endMenuIndex == 1) {          // SWAP CHARACTERS
+    resetCharSelect();
+    screen = "CHAR_SELECT";
+    playMusic(musMenu);
+  } else {                                 // MAIN MENU
+    screen = "MENU";
+    playMusic(musMenu);
   }
 }
 
@@ -363,15 +515,29 @@ void keyPressed() {
 
   // MENU
   if (screen.equals("MENU")) {
-    if (keyCode == UP   || key == 'w' || key == 'W') menuIndex = (menuIndex + menuItems.length - 1) % menuItems.length;
-    if (keyCode == DOWN || key == 's' || key == 'S') menuIndex = (menuIndex + 1) % menuItems.length;
-    if (keyCode == ENTER || keyCode == RETURN || key == ' ') selectMenu();
+    if (keyCode == UP   || key == 'w' || key == 'W') { menuIndex = (menuIndex + menuItems.length - 1) % menuItems.length; sfx(sndMenuMove, 0.6); }
+    if (keyCode == DOWN || key == 's' || key == 'S') { menuIndex = (menuIndex + 1) % menuItems.length; sfx(sndMenuMove, 0.6); }
+    if (keyCode == ENTER || keyCode == RETURN || key == ' ') { sfx(sndMenuSelect, 0.7); selectMenu(); }
     return;
   }
 
   // CONTROLS
   if (screen.equals("CONTROLS")) {
-    if (keyCode == ENTER || keyCode == RETURN || key == ' ') screen = "MENU";
+    if (keyCode == ENTER || keyCode == RETURN || key == ' ') { sfx(sndMenuSelect, 0.7); screen = "MENU"; }
+    return;
+  }
+
+  // CHARACTER SELECT
+  if (screen.equals("CHAR_SELECT")) {
+    // P1 move (A/D)
+    if (key == 'a' || key == 'A') { p1Cursor = (p1Cursor + ROSTER_SIZE - 1) % ROSTER_SIZE; sfx(sndMenuMove, 0.6); }
+    if (key == 'd' || key == 'D') { p1Cursor = (p1Cursor + 1) % ROSTER_SIZE; sfx(sndMenuMove, 0.6); }
+    // P2 move (arrows)
+    if (keyCode == LEFT)  { p2Cursor = (p2Cursor + ROSTER_SIZE - 1) % ROSTER_SIZE; sfx(sndMenuMove, 0.6); }
+    if (keyCode == RIGHT) { p2Cursor = (p2Cursor + 1) % ROSTER_SIZE; sfx(sndMenuMove, 0.6); }
+    // confirm: P1 = SPACE, P2 = Num0 or .
+    if (!repeat && key == ' ')                                          tryLock(true);
+    if (!repeat && (keyCode == P2_ATTACK || keyCode == P2_ATTACK_ALT))  tryLock(false);
     return;
   }
 
@@ -398,9 +564,14 @@ void keyPressed() {
     if (!repeat && (keyCode == 107 || key == 'l' || key == 'L')) p2.tryUltimate();  // Numpad + or L
   }
 
-  // match over - back to menu
-  if ((keyCode == ENTER || keyCode == RETURN) && matchState.equals("MATCH_OVER")) {
-    screen = "MENU";
+  // match over - 3-option menu (WASD/arrows + ENTER/SPACE)
+  if (matchState.equals("MATCH_OVER")) {
+    if (keyCode == UP || keyCode == LEFT || key == 'w' || key == 'W' || key == 'a' || key == 'A')
+      { endMenuIndex = (endMenuIndex + endMenuItems.length - 1) % endMenuItems.length; sfx(sndMenuMove, 0.6); }
+    if (keyCode == DOWN || keyCode == RIGHT || key == 's' || key == 'S' || key == 'd' || key == 'D')
+      { endMenuIndex = (endMenuIndex + 1) % endMenuItems.length; sfx(sndMenuMove, 0.6); }
+    if (keyCode == ENTER || keyCode == RETURN || key == ' ') { sfx(sndMenuSelect, 0.7); selectEndMenu(); }
+    return;
   }
 }
 
@@ -440,9 +611,16 @@ float[] contactPoint(HitBox a, HitBox b) {
   return new float[] { (ix1 + ix2) / 2.0, (iy1 + iy2) / 2.0 };
 }
 
+Player makeFighter(int idx, float x, float y, boolean startRight) {
+  switch (idx) {
+    case 1:  return new Brawler(x, y, startRight);
+    default: return new Samurai(x, y, startRight);   // slot 0 / fallback
+  }
+}
+
 void spawnPlayers() {
-  p1 = new Samurai(80, 570, true);
-  p2 = new Brawler(825, 570, false);
+  p1 = makeFighter(p1CharIndex, 80,  570, true);
+  p2 = makeFighter(p2CharIndex, 825, 570, false);
 }
 
 //push box
@@ -505,6 +683,7 @@ boolean resolveAttack(Player attacker, Player defender, String defenderTag, int 
     attacker.stunTimer = 30;
     roundMsg   = defenderTag + " PARRY!";
     parryFlash = 235;
+    sfx(sndParry, 0.9);
     impact(16, 16);
     attacker.applyKnockback(attacker.facingRight ? -11 : 11);
     spawnHitSparks(hx, hy);
@@ -515,6 +694,7 @@ boolean resolveAttack(Player attacker, Player defender, String defenderTag, int 
   if (defender.isBlockingType(atk.type) && defender.isFacing(attacker)) {
     int chip = min(CHIP_DMG, max(0, defender.hp - 1));   // block can't KO
     defender.takeDamage(chip, hx, hy);
+    sfx(sndBlock, 0.8);
     impact(4, 5);
     defender.applyKnockback(attacker.facingRight ? 6 : -6);
     attacker.addMeter(chip * METER_DEAL);                // charge the ult meter
@@ -526,6 +706,7 @@ boolean resolveAttack(Player attacker, Player defender, String defenderTag, int 
     int dealt = attacker.attackDamage(atk.type);
     defender.takeDamage(dealt, hx, hy);
     attacker.onLandHit(atk.type, hx, hy);   // let the attacker react
+    sfx(sndHit, 0.85);
     impact(9, 14);
     defender.applyKnockback(attacker.facingRight ? 13 : -13);
     attacker.addMeter(dealt * METER_DEAL);              // primary: dealing damage
@@ -542,17 +723,48 @@ void checkHits() {
 }
 
 void endRound(int winnerId) {
-  if (winnerId == 1) {
-    p1Wins++;
-    roundMsg = "PLAYER 1 \u2014 K.O.!";
+  if (winnerId == 1) p1Wins++;
+  else               p2Wins++;
+  impact(30, 22);
+  sfx(sndKO, 0.95);
+
+  // deciding K.O. \u2014 show the "WINS!" banner briefly, then the ROUND_OVER timer rolls into the menu
+  if (p1Wins >= roundsToWin || p2Wins >= roundsToWin) {
+    roundMsg   = (winnerId == 1) ? "PLAYER 1 WINS!" : "PLAYER 2 WINS!";
+    roundTimer = MATCH_END_DELAY;
   } else {
-    p2Wins++;
-    roundMsg = "PLAYER 2 \u2014 K.O.!";
+    roundMsg   = (winnerId == 1) ? "PLAYER 1 \u2014 K.O.!" : "PLAYER 2 \u2014 K.O.!";
+    roundTimer = ROUND_DELAY;
   }
   matchState = "ROUND_OVER";
-  roundTimer = ROUND_DELAY;
-  impact(30, 22);
   frameRate(30);
+}
+
+// transition straight into the match-over menu (winner banner + Play Again / Swap / Main Menu)
+void goToMatchOver(int winnerId) {
+  matchState   = "MATCH_OVER";
+  endMenuIndex = 0;
+  frameRate(60);
+
+  if (winnerId == 1) {
+    roundMsg = "PLAYER 1 WINS!";
+    p1TotalWins++;
+    p1WinStreak++;
+    p2WinStreak = 0; // Reset P2's streak
+    if (p1WinStreak > p1HighestStreak) {
+      p1HighestStreak = p1WinStreak;
+      saveHighScore();
+    }
+  } else {
+    roundMsg = "PLAYER 2 WINS!";
+    p2TotalWins++;
+    p2WinStreak++;
+    p1WinStreak = 0; // Reset P1's streak
+    if (p2WinStreak > p2HighestStreak) {
+      p2HighestStreak = p2WinStreak;
+      saveHighScore();
+    }
+  }
 }
 
 // =============================================================================
@@ -663,17 +875,30 @@ void drawHUD() {
     textSize(17);
     text("P1   A/D move   W jump   SPACE strike (fwd=lunge / back=hop / S=low)   F block (S=low)   R sheathe   Q ULTIMATE",
       width / 2, height - 42);
-    text("P2   LEFT ARROW RIGHT ARROW move   UP ARROW jump   strike Num0 or .   block Num. or ,   sheathe Num5 or /   Num+/L ULTIMATE   (DOWN ARROW=low)",
+    text("P2   LEFT ARROW RIGHT ARROW move   UP ARROW jump   strike Num0 or .   block Num. or ,   dodge Num5 or /   Num+/L ULTIMATE   (DOWN ARROW=low)",
       width / 2, height - 22);
     textAlign(LEFT);
   } else if (matchState.equals("ROUND_OVER") || matchState.equals("MATCH_OVER")) {
     fill(255, 240, 100);
     textSize(matchState.equals("MATCH_OVER") ? 44 : 34);
-    text(roundMsg, width / 2, height / 2);
+    text(roundMsg, width / 2, matchState.equals("MATCH_OVER") ? height / 2 - 60 : height / 2);
     if (matchState.equals("MATCH_OVER")) {
-      fill(220);
-      textSize(16);
-      text("Press ENTER to return to menu", width / 2, height / 2 + 44);
+      for (int i = 0; i < endMenuItems.length; i++) {
+        boolean sel = (i == endMenuIndex);
+        float yy = height / 2 + 20 + i * 46;
+        if (sel) {
+          fill(235, 205, 110);
+          textSize(28);
+          text("→  " + endMenuItems[i] + "  ←", width / 2, yy);
+        } else {
+          fill(150);
+          textSize(24);
+          text(endMenuItems[i], width / 2, yy);
+        }
+      }
+      fill(120);
+      textSize(13);
+      text("W / S  or  arrows  to move        ENTER or SPACE to select", width / 2, height / 2 + 20 + endMenuItems.length * 46 + 14);
     }
     textAlign(LEFT);
   } else if (!roundMsg.equals("")) {

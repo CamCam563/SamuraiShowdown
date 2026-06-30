@@ -61,6 +61,11 @@ class Player extends Entity {
   boolean isStunned = false;
   int stunTimer = 0;
 
+  // --- KNOCKDOWN / FALL-OVER (driven by the samurai's Iaijutsu finisher) ---
+  float tilt       = 0;     // current lean in radians (0 = upright)
+  float tiltTarget = 0;     // lean we are easing toward
+  int   downTimer  = 0;     // frames to stay toppled before getting back up
+
   // --- ULTIMATE / CHARGE METER ---
   float ultMeter = 0;          // 0 .. ULT_MAX
   final float ULT_MAX = 100;
@@ -222,10 +227,38 @@ class Player extends Entity {
 
   void applyKnockback(float amt) { vx += amt; }
 
+  // topple over in the given direction (sign), staying down for `frames`
+  void knockOver(int dir, int frames) {
+    tiltTarget = dir * (HALF_PI * 0.92);   // nearly flat on the ground
+    downTimer  = frames;
+    isStunned  = true;                     // stay helpless until back on your feet
+    stunTimer  = max(stunTimer, frames + 12);
+  }
+
+  // ease the lean toward its target; runs every frame, even while stunned
+  void updateTilt() {
+    if (isDead() && tiltTarget != 0) {     // KO'd: stay down for good
+      tilt += (tiltTarget - tilt) * 0.25;
+      return;
+    }
+    if (downTimer > 0) {
+      downTimer--;
+      tilt += (tiltTarget - tilt) * 0.25;  // fall
+    } else if (tilt != 0 || tiltTarget != 0) {
+      tiltTarget = 0;
+      tilt += (0 - tilt) * 0.2;            // climb back up
+      if (abs(tilt) < 0.01) tilt = 0;
+    }
+  }
+
   // --- ULTIMATE HELPERS ---
   boolean ultReady() { return ultMeter >= ULT_MAX && !isUlting; }
 
-  void addMeter(float amt) { ultMeter = constrain(ultMeter + amt, 0, ULT_MAX); }
+  void addMeter(float amt) {
+    boolean wasReady = ultMeter >= ULT_MAX;
+    ultMeter = constrain(ultMeter + amt, 0, ULT_MAX);
+    if (!wasReady && ultMeter >= ULT_MAX) sfx(sndUltReady, 0.7);   // chime on fill
+  }
 
   void tryUltimate() {
     if (!ultReady() || !canAct() || !onGround || isAttacking || isStunned || isUlting) return;
@@ -323,6 +356,8 @@ class Player extends Entity {
       } else if (attackType.equals("HIGH") && pendingBackDash) {
         vx = (facingRight ? -1 : 1) * backDashSpeed;
       }
+
+      if (usesSword) playSlash();   // brawler plays its own punch (override)
     }
   }
 
@@ -372,11 +407,13 @@ class Player extends Entity {
       isJumping = true;
       animFrame = 0;
       animTimer = 0;
+      sfx(sndWhoosh, 0.5);
     }
   }
 
   void update() {
     perFrame();
+    updateTilt();          // fall-over animation advances regardless of state
     if (isUlting) {
       updateUltimate();
       applyPhysics();
@@ -441,6 +478,12 @@ class Player extends Entity {
     }
 
     if (dashTimer > 0) moving = true;
+
+    // While holding block, lock-on: always face the opponent.
+    if (isBlocking) {
+      Player opp  = (this == p1) ? p2 : p1;
+      facingRight = opp.x > x;
+    }
 
     //ANIMATION LOGIC
     if (isAttacking) {
@@ -604,6 +647,13 @@ class Player extends Entity {
     int drawW = img.width  * SCALE;
     int drawH = img.height * SCALE;
     float drawY = y - drawH;
+    pushMatrix();
+    if (tilt != 0) {                       // topple about the feet, not the center
+      float footX = x + BASE_W / 2.0;
+      translate(footX, y);
+      rotate(tilt);
+      translate(-footX, -y);
+    }
     tint(tintCol);
     if (facingRight) {
       image(img, x, drawY, drawW, drawH);
@@ -616,5 +666,6 @@ class Player extends Entity {
       popMatrix();
     }
     noTint();
+    popMatrix();
   }
 }
